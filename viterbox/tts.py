@@ -382,12 +382,12 @@ class Viterbox:
         use_autocast = self.device in ['cuda', 'mps']
         device_type = 'cuda' if self.device == 'cuda' else 'mps'
 
-        with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.float16, enabled=(self.device==use_autocast)):
+        with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=(self.device==use_autocast)):
             # Generate speech tokens with T3
             speech_tokens = self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=1000,
+                max_new_tokens=600,
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
