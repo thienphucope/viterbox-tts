@@ -50,7 +50,11 @@ def normalize_text(text: str, language: str = "vi") -> str:
     """Normalize Vietnamese text (numbers, abbreviations, etc.)"""
     if language == "vi" and HAS_VINORM and _normalizer is not None:
         try:
-            return _normalizer.normalize(text)
+            normalized = _normalizer.normalize(text)
+            # Fix: soe_vinorm adds spaces before punctuation, remove them
+            # "xin chào , bạn ." -> "xin chào, bạn."
+            normalized = re.sub(r'\s+([,.!?;:])', r'\1', normalized)
+            return normalized
         except Exception:
             return text
     return text
