@@ -87,6 +87,184 @@ def trim_silence(audio: np.ndarray, sr: int, top_db: int = 30) -> np.ndarray:
     return trimmed
 
 
+def normalize_loudness(
+    audio: np.ndarray,
+    sr: int,
+    target_lufs: float = -23.0,
+    peak_limit: float = -1.0,
+) -> np.ndarray:
+    """
+    Normalize audio loudness using EBU R128 standard (Broadcast).
+    
+    EBU R128 là chuẩn quốc tế cho broadcast audio:
+    - Đảm bảo loudness nhất quán giữa các file
+    - Tránh clipping (quá to gây méo)
+    - Target -23 LUFS cho broadcast, -16 LUFS cho streaming
+    
+    Args:
+        audio: Input audio array (float32, range -1 to 1)
+        sr: Sample rate
+        target_lufs: Target integrated loudness in LUFS
+                     -23 LUFS = EBU R128 broadcast standard
+                     -16 LUFS = Streaming (Spotify, YouTube)
+                     -14 LUFS = Podcast
+        peak_limit: Maximum true peak in dBFS (prevents clipping)
+        
+    Returns:
+        Loudness-normalized audio array
+    """
+    if len(audio) == 0:
+        return audio
+    
+    # Try EBU R128 normalization with pyloudnorm
+    try:
+        import pyloudnorm as pyln
+        
+        # Measure current loudness
+        meter = pyln.Meter(sr)
+        current_lufs = meter.integrated_loudness(audio)
+        
+        # Skip if audio is too quiet to measure
+        if np.isinf(current_lufs) or current_lufs < -70:
+            return _peak_normalize(audio, peak_limit)
+        
+        # Calculate gain needed
+        gain_db = target_lufs - current_lufs
+        gain_linear = 10 ** (gain_db / 20)
+        
+        # Apply gain
+        audio = audio * gain_linear
+        
+        # Apply true peak limiter to prevent clipping
+        audio = _apply_limiter(audio, peak_limit)
+        
+        return audio
+        
+    except ImportError:
+        # Fallback to simple peak normalization if pyloudnorm not installed
+        return _peak_normalize(audio, peak_limit)
+    except Exception:
+        # Fallback for any other errors
+        return _peak_normalize(audio, peak_limit)
+
+
+def _peak_normalize(audio: np.ndarray, peak_db: float = -1.0) -> np.ndarray:
+    """
+    Simple peak normalization - fallback when pyloudnorm not available.
+    
+    Args:
+        audio: Input audio array
+        peak_db: Target peak level in dB (default -1dB for headroom)
+        
+    Returns:
+        Peak-normalized audio
+    """
+    if len(audio) == 0:
+        return audio
+    
+    peak = np.max(np.abs(audio))
+    if peak > 0:
+        target_peak = 10 ** (peak_db / 20)
+        audio = audio * (target_peak / peak)
+    
+    return audio
+
+
+def _apply_limiter(audio: np.ndarray, threshold_db: float = -1.0) -> np.ndarray:
+    """
+    Simple soft limiter to prevent clipping.
+    
+    Args:
+        audio: Input audio array
+        threshold_db: Threshold in dB (samples above this are limited)
+        
+    Returns:
+        Limited audio (no samples exceed threshold)
+    """
+    threshold = 10 ** (threshold_db / 20)
+    
+    # Soft knee limiting using tanh
+    peak = np.max(np.abs(audio))
+    if peak > threshold:
+        # Calculate how much we're over
+        ratio = peak / threshold
+        if ratio > 1.5:
+            # Hard limit if way over
+            audio = np.clip(audio, -threshold, threshold)
+        else:
+            # Soft compression
+            audio = np.tanh(audio / threshold) * threshold
+    
+    return audio
+
+
+def postprocess_audio(
+    audio: np.ndarray, 
+    sr: int, 
+    highpass_cutoff: int = 60,
+    trim_top_db: int = 25,
+    chop_end_ms: int = 30,
+    fade_out_ms: int = 80,
+    normalize: bool = True,
+    target_lufs: float = -23.0,
+) -> np.ndarray:
+    """
+    Full postprocessing pipeline to clean audio artifacts.
+    
+    Safe for speech because:
+    - highpass_cutoff=80Hz: Speech starts at ~100Hz, won't affect voice
+    - trim_top_db=25: Only trims very quiet parts (-25dB below peak)
+    - chop_end_ms=30: Very short, removes residual S3Gen noise
+    - fade_out_ms=80: Too short to notice (<150ms human perception threshold)
+    - normalize=True: EBU R128 loudness normalization for consistent volume
+    
+    Args:
+        audio: Input audio array
+        sr: Sample rate
+        highpass_cutoff: Cutoff frequency for highpass filter (Hz)
+        trim_top_db: Threshold for silence trimming (dB)
+        chop_end_ms: Milliseconds to chop from end
+        fade_out_ms: Fade-out duration in milliseconds
+        normalize: Whether to apply EBU R128 loudness normalization
+        target_lufs: Target loudness in LUFS (-23=broadcast, -16=streaming)
+        
+    Returns:
+        Cleaned and normalized audio array
+    """
+    from scipy.signal import butter, filtfilt
+    
+    if len(audio) == 0:
+        return audio
+    
+    # 1. High-pass filter to remove low-frequency rumble/hum
+    if highpass_cutoff > 0:
+        nyquist = sr / 2
+        # Use lower order filter (3) for gentler rolloff
+        b, a = butter(3, highpass_cutoff / nyquist, btype='high')
+        audio = filtfilt(b, a, audio)
+    
+    # 2. Trim silence with slightly aggressive threshold
+    audio, _ = librosa.effects.trim(audio, top_db=trim_top_db)
+    
+    # 3. Chop a small amount from end (where noise artifacts usually appear)
+    chop_samples = int(sr * chop_end_ms / 1000)
+    if len(audio) > chop_samples + sr // 4:  # Keep at least 0.25s
+        audio = audio[:-chop_samples]
+    
+    # 4. Apply smooth fade-out to prevent clicks/pops
+    fade_samples = int(sr * fade_out_ms / 1000)
+    if len(audio) > fade_samples:
+        # Use cosine fade curve for smoother transition
+        fade_curve = np.cos(np.linspace(0, np.pi / 2, fade_samples)) ** 2
+        audio[-fade_samples:] = audio[-fade_samples:] * fade_curve
+    
+    # 5. Loudness normalization (EBU R128)
+    if normalize:
+        audio = normalize_loudness(audio, sr, target_lufs=target_lufs)
+    
+    return audio
+
+
 def crossfade_concat(audios: List[np.ndarray], sr: int, fade_ms: int = 50, pause_ms: int = 500) -> np.ndarray:
     """
     Concatenate audio segments with crossfading and optional pause between sentences.
@@ -502,20 +680,30 @@ class Viterbox:
             )
             return torch.from_numpy(audio_np).unsqueeze(0)
     
-    def save_audio(self, audio: torch.Tensor, path: Union[str, Path], trim_silence: bool = True):
+    def save_audio(
+        self, 
+        audio: torch.Tensor, 
+        path: Union[str, Path], 
+        clean_artifacts: bool = True,
+        trim_silence: bool = True,
+    ):
         """
-        Save audio to file.
+        Save audio to file with optional postprocessing.
         
         Args:
             audio: Audio tensor from generate()
             path: Output file path
-            trim_silence: Whether to trim trailing silence
+            clean_artifacts: Apply full postprocessing (highpass, trim, fade-out)
+            trim_silence: Whether to trim trailing silence (if clean_artifacts=False)
         """
         import soundfile as sf
         
         audio_np = audio[0].cpu().numpy()
         
-        if trim_silence:
+        if clean_artifacts:
+            # Full postprocessing pipeline
+            audio_np = postprocess_audio(audio_np, self.sr)
+        elif trim_silence:
             audio_np, _ = librosa.effects.trim(audio_np, top_db=30)
         
         sf.write(str(path), audio_np, self.sr)

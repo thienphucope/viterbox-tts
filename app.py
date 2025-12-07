@@ -16,6 +16,7 @@ import tempfile, os
 os.environ["GRADIO_TEMP_DIR"] = tempfile.gettempdir() + "/my_gradio_tmp"
 os.makedirs(os.environ["GRADIO_TEMP_DIR"], exist_ok=True)
 from viterbox import Viterbox
+from viterbox.tts import postprocess_audio
 
 # Sample sentences
 SAMPLES = {
@@ -103,8 +104,8 @@ def generate_speech(
         # Convert to numpy
         audio_np = wav[0].cpu().numpy()
         
-        # Trim silence
-        audio_np, _ = librosa.effects.trim(audio_np, top_db=30)
+        # Full postprocessing: highpass filter + trim + fade-out
+        audio_np = postprocess_audio(audio_np, MODEL.sr)
         
         duration = len(audio_np) / MODEL.sr
         status = f"✅ Generated! | {duration:.2f}s | {language.upper()}"
