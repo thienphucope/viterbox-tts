@@ -343,7 +343,7 @@ class Viterbox:
         s3gen.to(device).eval()
         
         # Load tokenizer
-        tokenizer = MTLTokenizer(str(ckpt_dir / "tokenizer_vi_expanded.json"))
+        tokenizer = MTLTokenizer(str(ckpt_dir / "tokenizer.json"))
         
         model = cls(t3, s3gen, ve, tokenizer, device)
         
