@@ -298,9 +298,9 @@ class Viterbox:
         # Load Voice Encoder
         ve = VoiceEncoder()
         if device == "mps":
-            ve.load_state_dict(torch.load(ckpt_dir / "ve.pt", map_location='cpu',weights_only=True))
+            ve.load_state_dict(torch.load(ckpt_dir / "ve.pt", map_location='cpu',weights_only=False))
         else:
-            ve.load_state_dict(torch.load(ckpt_dir / "ve.pt", weights_only=True))
+            ve.load_state_dict(torch.load(ckpt_dir / "ve.pt", weights_only=False))
         ve.to(device).eval()
         
         # Load T3 model
@@ -337,9 +337,9 @@ class Viterbox:
         # Load S3Gen
         s3gen = S3Gen()
         if device == "mps":
-            s3gen.load_state_dict(torch.load(ckpt_dir / "s3gen.pt", map_location='cpu',weights_only=True))
+            s3gen.load_state_dict(torch.load(ckpt_dir / "s3gen.pt", map_location='cpu',weights_only=False))
         else:
-            s3gen.load_state_dict(torch.load(ckpt_dir / "s3gen.pt", weights_only=True))
+            s3gen.load_state_dict(torch.load(ckpt_dir / "s3gen.pt", weights_only=False))
         s3gen.to(device).eval()
         
         # Load tokenizer
