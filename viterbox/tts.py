@@ -305,7 +305,7 @@ class Viterbox:
         
         # Load T3 model
         t3 = T3(T3Config.multilingual())
-        t3_state = load_safetensors(ckpt_dir / "splitthien2-5k-2-1200.safetensors")
+        t3_state = load_safetensors(ckpt_dir / "splitthien2-5k-0-563.safetensors")
         
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
