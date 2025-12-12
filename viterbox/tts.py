@@ -50,11 +50,7 @@ def normalize_text(text: str, language: str = "vi") -> str:
     """Normalize Vietnamese text (numbers, abbreviations, etc.)"""
     if language == "vi" and HAS_VINORM and _normalizer is not None:
         try:
-            normalized = _normalizer.normalize(text)
-            # Fix: soe_vinorm adds spaces before punctuation, remove them
-            # "xin chào , bạn ." -> "xin chào, bạn."
-            normalized = re.sub(r'\s+([,.!?;:])', r'\1', normalized)
-            return normalized
+            return _normalizer.normalize(text)
         except Exception:
             return text
     return text
@@ -85,188 +81,57 @@ def _split_text_to_sentences(text: str) -> List[str]:
     return [s for s in sentences if s.strip()]
 
 
+def split_text_smart(text: str, min_words=20, merge_last_threshold=10) -> List[str]:
+    # 1. Split text into raw sentences
+    pattern = r'([.?!]+)'
+    parts = re.split(pattern, text)
+
+    raw_sentences = []
+    current = ""
+    for part in parts:
+        if re.match(pattern, part):
+            current += part
+            raw_sentences.append(current.strip())
+            current = ""
+        else:
+            current += part
+    if current.strip():
+        raw_sentences.append(current.strip())
+
+    # 2. Merge sentences into chunks with min word count
+    chunks = []
+    buffer = ""
+
+    for sent in raw_sentences:
+        # Count words if added to current buffer
+        candidate = (buffer + " " + sent).strip() if buffer else sent
+        word_count = len(candidate.split())
+
+        if word_count < min_words:
+            # Keep merging
+            buffer = candidate
+        else:
+            # Flush the buffer as a chunk
+            chunks.append(candidate.strip())
+            buffer = ""
+
+    # 3. Add remaining buffer
+    if buffer:
+        chunks.append(buffer.strip())
+
+    # 4. If last chunk < merge_last_threshold => merge it with previous
+    if len(chunks) > 1 and len(chunks[-1].split()) < merge_last_threshold:
+        chunks[-2] += " " + chunks[-1]
+        chunks.pop()
+
+    return chunks
+
+
+
 def trim_silence(audio: np.ndarray, sr: int, top_db: int = 30) -> np.ndarray:
     """Trim silence from audio."""
     trimmed, _ = librosa.effects.trim(audio, top_db=top_db)
     return trimmed
-
-
-def normalize_loudness(
-    audio: np.ndarray,
-    sr: int,
-    target_lufs: float = -23.0,
-    peak_limit: float = -1.0,
-) -> np.ndarray:
-    """
-    Normalize audio loudness using EBU R128 standard (Broadcast).
-    
-    EBU R128 là chuẩn quốc tế cho broadcast audio:
-    - Đảm bảo loudness nhất quán giữa các file
-    - Tránh clipping (quá to gây méo)
-    - Target -23 LUFS cho broadcast, -16 LUFS cho streaming
-    
-    Args:
-        audio: Input audio array (float32, range -1 to 1)
-        sr: Sample rate
-        target_lufs: Target integrated loudness in LUFS
-                     -23 LUFS = EBU R128 broadcast standard
-                     -16 LUFS = Streaming (Spotify, YouTube)
-                     -14 LUFS = Podcast
-        peak_limit: Maximum true peak in dBFS (prevents clipping)
-        
-    Returns:
-        Loudness-normalized audio array
-    """
-    if len(audio) == 0:
-        return audio
-    
-    # Try EBU R128 normalization with pyloudnorm
-    try:
-        import pyloudnorm as pyln
-        
-        # Measure current loudness
-        meter = pyln.Meter(sr)
-        current_lufs = meter.integrated_loudness(audio)
-        
-        # Skip if audio is too quiet to measure
-        if np.isinf(current_lufs) or current_lufs < -70:
-            return _peak_normalize(audio, peak_limit)
-        
-        # Calculate gain needed
-        gain_db = target_lufs - current_lufs
-        gain_linear = 10 ** (gain_db / 20)
-        
-        # Apply gain
-        audio = audio * gain_linear
-        
-        # Apply true peak limiter to prevent clipping
-        audio = _apply_limiter(audio, peak_limit)
-        
-        return audio
-        
-    except ImportError:
-        # Fallback to simple peak normalization if pyloudnorm not installed
-        return _peak_normalize(audio, peak_limit)
-    except Exception:
-        # Fallback for any other errors
-        return _peak_normalize(audio, peak_limit)
-
-
-def _peak_normalize(audio: np.ndarray, peak_db: float = -1.0) -> np.ndarray:
-    """
-    Simple peak normalization - fallback when pyloudnorm not available.
-    
-    Args:
-        audio: Input audio array
-        peak_db: Target peak level in dB (default -1dB for headroom)
-        
-    Returns:
-        Peak-normalized audio
-    """
-    if len(audio) == 0:
-        return audio
-    
-    peak = np.max(np.abs(audio))
-    if peak > 0:
-        target_peak = 10 ** (peak_db / 20)
-        audio = audio * (target_peak / peak)
-    
-    return audio
-
-
-def _apply_limiter(audio: np.ndarray, threshold_db: float = -1.0) -> np.ndarray:
-    """
-    Simple soft limiter to prevent clipping.
-    
-    Args:
-        audio: Input audio array
-        threshold_db: Threshold in dB (samples above this are limited)
-        
-    Returns:
-        Limited audio (no samples exceed threshold)
-    """
-    threshold = 10 ** (threshold_db / 20)
-    
-    # Soft knee limiting using tanh
-    peak = np.max(np.abs(audio))
-    if peak > threshold:
-        # Calculate how much we're over
-        ratio = peak / threshold
-        if ratio > 1.5:
-            # Hard limit if way over
-            audio = np.clip(audio, -threshold, threshold)
-        else:
-            # Soft compression
-            audio = np.tanh(audio / threshold) * threshold
-    
-    return audio
-
-
-def postprocess_audio(
-    audio: np.ndarray, 
-    sr: int, 
-    highpass_cutoff: int = 60,
-    trim_top_db: int = 25,
-    chop_end_ms: int = 30,
-    fade_out_ms: int = 80,
-    normalize: bool = True,
-    target_lufs: float = -23.0,
-) -> np.ndarray:
-    """
-    Full postprocessing pipeline to clean audio artifacts.
-    
-    Safe for speech because:
-    - highpass_cutoff=80Hz: Speech starts at ~100Hz, won't affect voice
-    - trim_top_db=25: Only trims very quiet parts (-25dB below peak)
-    - chop_end_ms=30: Very short, removes residual S3Gen noise
-    - fade_out_ms=80: Too short to notice (<150ms human perception threshold)
-    - normalize=True: EBU R128 loudness normalization for consistent volume
-    
-    Args:
-        audio: Input audio array
-        sr: Sample rate
-        highpass_cutoff: Cutoff frequency for highpass filter (Hz)
-        trim_top_db: Threshold for silence trimming (dB)
-        chop_end_ms: Milliseconds to chop from end
-        fade_out_ms: Fade-out duration in milliseconds
-        normalize: Whether to apply EBU R128 loudness normalization
-        target_lufs: Target loudness in LUFS (-23=broadcast, -16=streaming)
-        
-    Returns:
-        Cleaned and normalized audio array
-    """
-    from scipy.signal import butter, filtfilt
-    
-    if len(audio) == 0:
-        return audio
-    
-    # 1. High-pass filter to remove low-frequency rumble/hum
-    if highpass_cutoff > 0:
-        nyquist = sr / 2
-        # Use lower order filter (3) for gentler rolloff
-        b, a = butter(3, highpass_cutoff / nyquist, btype='high')
-        audio = filtfilt(b, a, audio)
-    
-    # 2. Trim silence with slightly aggressive threshold
-    audio, _ = librosa.effects.trim(audio, top_db=trim_top_db)
-    
-    # 3. Chop a small amount from end (where noise artifacts usually appear)
-    chop_samples = int(sr * chop_end_ms / 1000)
-    if len(audio) > chop_samples + sr // 4:  # Keep at least 0.25s
-        audio = audio[:-chop_samples]
-    
-    # 4. Apply smooth fade-out to prevent clicks/pops
-    fade_samples = int(sr * fade_out_ms / 1000)
-    if len(audio) > fade_samples:
-        # Use cosine fade curve for smoother transition
-        fade_curve = np.cos(np.linspace(0, np.pi / 2, fade_samples)) ** 2
-        audio[-fade_samples:] = audio[-fade_samples:] * fade_curve
-    
-    # 5. Loudness normalization (EBU R128)
-    if normalize:
-        audio = normalize_loudness(audio, sr, target_lufs=target_lufs)
-    
-    return audio
 
 
 def crossfade_concat(audios: List[np.ndarray], sr: int, fade_ms: int = 50, pause_ms: int = 500) -> np.ndarray:
@@ -440,7 +305,7 @@ class Viterbox:
         
         # Load T3 model
         t3 = T3(T3Config.multilingual())
-        t3_state = load_safetensors(ckpt_dir / "t3_ml24ls_v2.safetensors")
+        t3_state = load_safetensors(ckpt_dir / "splitthien2-5k-2-1200.safetensors")
         
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
@@ -569,7 +434,7 @@ class Viterbox:
             speech_tokens = self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=600,
+                max_new_tokens=1000,
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
@@ -580,6 +445,7 @@ class Viterbox:
             speech_tokens = speech_tokens[0]
             speech_tokens = drop_invalid_tokens(speech_tokens)
             speech_tokens = speech_tokens.to(self.device)
+
         
         # Generate waveform with S3Gen
         wav, _ = self.s3gen.inference(
@@ -587,7 +453,71 @@ class Viterbox:
             ref_dict=self.conds.s3,
         )
         
-        return wav[0].cpu().numpy()
+        wav_np = wav[0].cpu().numpy()
+
+        # Đếm số từ
+        clean_text = text.replace('.', '').replace(',', '').replace('?', '').replace('!', '')
+        num_words = len(clean_text.strip().split())
+
+        if num_words > 0 and num_words < 10:  # Chỉ xử lý khi < 10 từ
+            # Tính spectral flux (phát hiện thay đổi âm sắc giữa các từ)
+            hop_length = 256
+            spec = np.abs(librosa.stft(wav_np, hop_length=hop_length))
+            flux = np.sqrt(np.sum(np.diff(spec, axis=1)**2, axis=0))
+            flux = np.concatenate([[0], flux])  # Padding
+            
+            # Smooth để giảm nhiễu
+            from scipy.ndimage import gaussian_filter1d
+            flux_smooth = gaussian_filter1d(flux, sigma=2)
+            
+            # Tìm các peak (điểm thay đổi mạnh = biên từ)
+            from scipy.signal import find_peaks, argrelextrema
+            peaks, properties = find_peaks(
+                flux_smooth,
+                height=np.percentile(flux_smooth, 60),
+                distance=int(self.sr * 0.08 / hop_length),
+                prominence=np.std(flux_smooth) * 0.3
+            )
+            
+            print(f"  [Word Boundary Detection] Detected {len(peaks)} boundaries for {num_words} words")
+            
+            if len(peaks) >= num_words:
+                print(f"  [Trimming] Cutting after word {num_words}")
+                
+                # Lấy boundary thứ num_words
+                target_peak = peaks[num_words - 1]
+                
+                # Tìm tất cả các valley (điểm thấp) SAU peak - tìm xa hơn
+                search_start = target_peak
+                search_end = min(len(flux_smooth), target_peak + int(self.sr * 0.8 / hop_length))  # 800ms
+                search_region = flux_smooth[search_start:search_end]
+                
+                # Tìm các local minima (thung lũng)
+                valleys = argrelextrema(search_region, np.less, order=5)[0]  # order=5 để bắt valley rõ hơn
+                
+                if len(valleys) > 0:
+                    # Lấy valley THẤP NHẤT (deepest valley - xuống hết cỡ)
+                    deepest_valley = valleys[np.argmin(search_region[valleys])]
+                    valley_idx = search_start + deepest_valley
+                else:
+                    # Nếu không tìm thấy valley, lấy điểm thấp nhất
+                    valley_idx = search_start + np.argmin(search_region)
+                
+                # Chuyển về sample
+                cut_point = valley_idx * hop_length
+                
+                wav_np = wav_np[:cut_point]
+                
+                # Áp dụng fade out (50ms) ở cuối để tránh tiếng bụp
+                fade_length = int(self.sr * 0.05)  # 50ms
+                if len(wav_np) > fade_length:
+                    fade_curve = np.linspace(1.0, 0.0, fade_length)
+                    wav_np[-fade_length:] *= fade_curve
+                
+                # Trim silence nhẹ
+                wav_np, _ = librosa.effects.trim(wav_np, top_db=25)
+
+        return wav_np
     
     def generate(
         self,
@@ -599,7 +529,7 @@ class Viterbox:
         temperature: float = 0.8,
         top_p: float = 0.9,
         repetition_penalty: float = 1.2,
-        split_sentences: bool = True,
+        split_sentences: bool = False,
         crossfade_ms: int = 50,
         sentence_pause_ms: int = 500,
     ) -> torch.Tensor:
@@ -638,7 +568,7 @@ class Viterbox:
         
         if split_sentences:
             # Split text into sentences
-            sentences = _split_text_to_sentences(text)
+            sentences = split_text_smart(text)
             
             if len(sentences) == 0:
                 sentences = [text]
@@ -684,30 +614,20 @@ class Viterbox:
             )
             return torch.from_numpy(audio_np).unsqueeze(0)
     
-    def save_audio(
-        self, 
-        audio: torch.Tensor, 
-        path: Union[str, Path], 
-        clean_artifacts: bool = True,
-        trim_silence: bool = True,
-    ):
+    def save_audio(self, audio: torch.Tensor, path: Union[str, Path], trim_silence: bool = True):
         """
-        Save audio to file with optional postprocessing.
+        Save audio to file.
         
         Args:
             audio: Audio tensor from generate()
             path: Output file path
-            clean_artifacts: Apply full postprocessing (highpass, trim, fade-out)
-            trim_silence: Whether to trim trailing silence (if clean_artifacts=False)
+            trim_silence: Whether to trim trailing silence
         """
         import soundfile as sf
         
         audio_np = audio[0].cpu().numpy()
         
-        if clean_artifacts:
-            # Full postprocessing pipeline
-            audio_np = postprocess_audio(audio_np, self.sr)
-        elif trim_silence:
+        if trim_silence:
             audio_np, _ = librosa.effects.trim(audio_np, top_db=30)
         
         sf.write(str(path), audio_np, self.sr)
